@@ -5,3 +5,4 @@
 - [ ] Draw rectangles with the same color as the corresponding element
 - [ ] Using 'scrcpy' to display and control Android Device running Atomas
 - [ ] Continuous Game State Monitoring
+- [ ] Add `atomas-cv` Atomas Computer Vision Library with Multi Template Matching and non-maximum suppression
