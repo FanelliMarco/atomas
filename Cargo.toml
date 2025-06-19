@@ -1,6 +1,7 @@
 [workspace]
 members = [
-    "crates/atomas-core"
+    "crates/atomas-core",
+    "crates/atomas-cv"
 ]
 
 [package]
@@ -8,10 +9,8 @@ name = "atomas"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
 atomas-core = { path = "crates/atomas-core" }
-template-matching = { version = "0.2.0", features = ["image"] }
+atomas-cv = { path = "crates/atomas-cv" }
 image = "0.25.2"
 rand = "0.8.5"
