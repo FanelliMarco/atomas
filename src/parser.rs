@@ -19,6 +19,9 @@ pub fn detect_game_state<'a>(
     let mut config = DetectionConfig::default();
     config.template_dirs = vec!["assets/png".into()];
     config.output_dir = "assets/png/outputs".into();
+
+    // Low threshold to 0.6
+    config.template_config.threshold = 0.6;
     
     // Create detector
     let detector = GameStateDetector::new(config)?;
