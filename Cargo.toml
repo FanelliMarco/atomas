@@ -7,10 +7,10 @@ members = [
 [package]
 name = "atomas"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 atomas-core = { path = "crates/atomas-core" }
 atomas-cv = { path = "crates/atomas-cv" }
-image = "0.25.2"
-rand = "0.8.5"
+image = "0.25.6"
+rand = "0.9.1"
