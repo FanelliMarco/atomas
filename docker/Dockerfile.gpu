@@ -1,0 +1,53 @@
+FROM ghcr.io/rust-gpu/rust-cuda-ubuntu24-cuda12:latest
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Update package list 
+RUN apt update
+
+# Install basic dependencies
+RUN apt-get install -y luarocks lua5.1 liblua5.1-dev build-essential tmux curl git software-properties-common sudo fd-find ripgrep gzip gh libsdl2-dev libsdl2-gfx-dev llvm-dev libclang-dev clang libopencv-dev clang
+
+# Add Neovim PPA and install
+RUN add-apt-repository ppa:neovim-ppa/unstable -y && \
+    apt update && \
+    apt install neovim -y
+
+# Other dependencies
+RUN sudo apt install build-essential gcc dirmngr ca-certificates software-properties-common apt-transport-https dkms curl -y
+
+# Install Node.js via NVM
+ENV NVM_DIR="/root/.nvm"
+RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.3/install.sh | bash && \
+    . "$NVM_DIR/nvm.sh" && \
+    nvm install node && \
+    npm install --global tabby-agent
+
+# Install rr debugger
+RUN cd /tmp && \
+    wget https://github.com/rr-debugger/rr/releases/download/5.9.0/rr-5.9.0-Linux-$(uname -m).deb && \
+    dpkg -i rr-5.9.0-Linux-$(uname -m).deb || apt-get install -f -y
+
+# Install z3
+RUN apt install z3 -y
+
+# Set the working directory to /opt
+WORKDIR /opt
+
+# The following layers will download the Android command-line tools
+# to install the Android SDK, emulator and system images.
+# It will then install the Android SDK and emulator.
+COPY scripts/install-sdk.sh /opt/
+RUN chmod +x /opt/install-sdk.sh
+RUN /opt/install-sdk.sh
+
+# Copy the container scripts in the image.
+COPY scripts/*.sh /opt/
+RUN chmod +x /opt/*.sh
+
+# Missing socat and tailscale
+RUN curl -fsSL https://tailscale.com/install.sh | sh
+RUN apt install socat -y
+
+# Default command
+CMD ["/bin/bash"]
