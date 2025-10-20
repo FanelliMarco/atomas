@@ -54,7 +54,7 @@ impl Default for DetectionConfig {
                 size_threshold: (30, 200),
             },
             ring_detection: RingDetectionConfig {
-                max_ring_elements: 12,
+                max_ring_elements: 18,
                 angle_tolerance: 0.2,
                 radius_range: (100.0, 400.0),
             },

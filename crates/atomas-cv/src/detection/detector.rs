@@ -133,7 +133,6 @@ impl GameStateDetector {
         let start_time = std::time::Instant::now();
 
         let mut all_detections = BBoxCollection::new();
-        let mut element_bbox_pairs = Vec::new();
 
         // Process each element
         for element in &elements_data.elements {
@@ -146,17 +145,41 @@ impl GameStateDetector {
                     bbox.color = element.get_color();
                     bbox.metadata.insert("element_type".to_string(), 
                         format!("{:?}", element.element_type));
-                    
-                    // Store element-bbox pairs for classification
-                    element_bbox_pairs.push((element.clone(), bbox.clone()));
                 }
 
                 all_detections.extend(detections);
             }
         }
 
-        // Apply global NMS
+        // Debug: Show pre-NMS count
+        println!("Pre-NMS detections: {}", all_detections.len());
+        let pre_nms_stats = all_detections.stats();
+        for (class, count) in &pre_nms_stats.class_counts {
+            if *count > 1 {
+                println!("  {}: {} detections", class, count);
+            }
+        }
+
+        // Apply global NMS FIRST
         all_detections = all_detections.apply_global_nms(self.config.global_nms_threshold);
+
+        // Debug: Show post-NMS count
+        println!("Post-NMS detections: {}", all_detections.len());
+        let post_nms_stats = all_detections.stats();
+        for (class, count) in &post_nms_stats.class_counts {
+            println!("  {}: {} detections", class, count);
+        }
+
+        // NOW create element-bbox pairs from NMS-filtered detections
+        let mut element_bbox_pairs = Vec::new();
+        for bbox in all_detections.iter() {
+            // Find the corresponding element by class_id
+            if let Some(element) = elements_data.elements.iter()
+                .find(|e| e.name == bbox.class_id) 
+            {
+                element_bbox_pairs.push((element.clone(), bbox.clone()));
+            }
+        }
 
         // Classify detections as ring elements or player atom
         let image_size = image.size()?;
