@@ -48,7 +48,7 @@ impl Default for DetectionConfig {
             template_dirs: vec!["assets/png".into()],
             elements_file: "assets/txt/elements.txt".into(),
             output_dir: "assets/png/outputs".into(),
-            global_nms_threshold: 0.6,
+            global_nms_threshold: 0.2,
             player_atom_detection: PlayerAtomConfig {
                 center_tolerance: 0.1,
                 size_threshold: (30, 200),

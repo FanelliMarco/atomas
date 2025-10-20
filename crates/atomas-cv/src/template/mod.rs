@@ -46,9 +46,9 @@ pub struct TemplateConfig {
 impl Default for TemplateConfig {
     fn default() -> Self {
         Self {
-            threshold: 0.7,
-            max_detections_per_template: 10,
-            nms_threshold: 0.5,
+            threshold: 0.65,
+            max_detections_per_template: 18,
+            nms_threshold: 0.2,
             scale_factors: vec![1.0],
             use_normalized_correlation: true,
         }
