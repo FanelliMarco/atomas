@@ -1,15 +1,15 @@
 #!/bin/bash
 set -e
 
-source /root/.bashrc
-source /root/.cargo/env
-[ -f "$NVM_DIR/nvm.sh" ] && source "$NVM_DIR/nvm.sh"
+echo "Starting emulator in tmux session..."
 
-echo "Starting emulator..."
-/opt/start-emulator.sh > /var/log/emulator.log 2>&1 &
-echo $! > /var/run/emulator.pid
+# Start tmux with a persistent shell, then run emulator
+tmux new-session -d -s emulator bash
 
-echo "Emulator PID: $(cat /var/run/emulator.pid)"
-echo "Logs: tail -f /var/log/emulator.log"
+# Send the emulator start command to the tmux session
+tmux send-keys -t emulator "source /root/.bashrc && /opt/start-emulator.sh" C-m
+
+echo "Emulator started in tmux session 'emulator'"
+echo "Attach: tmux attach -t emulator"
 
 tail -f /dev/null
