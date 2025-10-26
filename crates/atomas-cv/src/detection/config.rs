@@ -21,7 +21,7 @@ pub struct DetectionConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlayerAtomConfig {
     pub center_tolerance: f64,
-    pub size_threshold: (u32, u32), // (min_size, max_size)
+    pub size_threshold: (u32, u32),
 }
 
 /// Ring detection configuration
@@ -29,7 +29,7 @@ pub struct PlayerAtomConfig {
 pub struct RingDetectionConfig {
     pub max_ring_elements: usize,
     pub angle_tolerance: f64,
-    pub radius_range: (f64, f64), // (min_radius, max_radius)
+    pub radius_range: (f64, f64),
 }
 
 /// Visualization configuration
@@ -65,5 +65,29 @@ impl Default for DetectionConfig {
                 save_intermediate: false,
             },
         }
+    }
+}
+
+impl DetectionConfig {
+    /// Configuration optimized for uneven lighting (gradient-based)
+    pub fn for_uneven_lighting() -> Self {
+        let mut config = Self::default();
+        config.template_config = TemplateConfig::gradient_matching();
+        config.template_config.threshold = 0.55; // Slightly lower for gradient matching
+        config
+    }
+
+    /// Configuration using squared difference with Laplacian
+    pub fn with_sqdiff_laplacian() -> Self {
+        let mut config = Self::default();
+        config.template_config = TemplateConfig::sqdiff_laplacian();
+        config
+    }
+
+    /// Configuration for edge-based matching
+    pub fn with_edge_matching() -> Self {
+        let mut config = Self::default();
+        config.template_config = TemplateConfig::edge_matching();
+        config
     }
 }
