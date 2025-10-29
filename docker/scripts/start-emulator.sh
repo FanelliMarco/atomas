@@ -2,11 +2,6 @@
 
 set -e
 
-# Source Android SDK environment
-if [ -f /root/.bashrc ]; then
-    source /root/.bashrc
-fi
-
 # Source monitoring functions if available
 if [ -f "./emulator-monitoring.sh" ]; then
     source ./emulator-monitoring.sh
