@@ -28,8 +28,8 @@ BASE_ADB_PORT=${BASE_ADB_PORT:-5555}
 ADB_SERVER_PORT=${ADB_SERVER_PORT:-5037}
 
 # Fixed resources (per request)
-OPT_MEMORY=512
-OPT_CORES=2
+OPT_MEMORY=2048
+OPT_CORES=4
 OPT_PARTITION_SIZE=1024
 
 # Android configuration
@@ -42,7 +42,7 @@ AVD_NAME_PREFIX=${AVD_NAME_PREFIX:-"avd"}
 # Always use swiftshader
 GPU_MODE="swiftshader_indirect"
 
-# Display 1440x2560 or 
+# Display 1440x2560 or
 DISPLAY_WIDTH=${DISPLAY_WIDTH:-480}
 DISPLAY_HEIGHT=${DISPLAY_HEIGHT:-800}
 DISPLAY_DENSITY=${DISPLAY_DENSITY:-213}
@@ -52,6 +52,22 @@ OPT_SKIP_AUTH=${SKIP_AUTH:-true}
 
 AUTH_FLAG=""
 export USER=${USER:-root}
+
+# Get container IP early for port forwarding
+LOCAL_IP=$(hostname -I | awk '{print $1}' 2>/dev/null)
+ENABLE_PORT_FORWARDING=false
+
+if [ -f /proc/net/route ]; then
+    if [ ! -z "$LOCAL_IP" ] && [ "$LOCAL_IP" != "127.0.0.1" ]; then
+        ENABLE_PORT_FORWARDING=true
+        echo "Container environment detected. IP: $LOCAL_IP"
+        echo "Port forwarding will be enabled after emulators start"
+    else
+        echo "Warning: Could not determine container IP for port forwarding"
+    fi
+else
+    echo "Not in container environment, port forwarding disabled"
+fi
 
 echo "=== Android Emulator Startup Script (2025, simplified) ==="
 echo "Configuration:"
@@ -63,6 +79,7 @@ echo "  Memory per emulator: ${OPT_MEMORY}MB"
 echo "  CPU Cores per emulator: $OPT_CORES"
 echo "  GPU Mode: $GPU_MODE"
 echo "  Package: $PACKAGE_PATH"
+echo "  Port Forwarding: $ENABLE_PORT_FORWARDING"
 echo ""
 
 # Start ADB server
@@ -70,30 +87,6 @@ echo "Starting ADB server on port $ADB_SERVER_PORT..."
 adb -a -P "$ADB_SERVER_PORT" server nodaemon &
 ADB_PID=$!
 sleep 2
-
-# Port forwarding for container env
-if [ -f /proc/net/route ]; then
-    echo "Container environment detected, setting up port forwarding..."
-
-    # Get container IP using multiple methods (more reliable)
-    LOCAL_IP=$(hostname -I | awk '{print $1}' 2>/dev/null)
-
-    if [ ! -z "$LOCAL_IP" ] && [ "$LOCAL_IP" != "127.0.0.1" ]; then
-        echo "Forwarding ports from $LOCAL_IP to localhost..."
-        for i in $(seq 0 $((NUM_EMULATORS - 1))); do
-            CONSOLE_PORT=$((BASE_CONSOLE_PORT + i * 2))
-            ADB_PORT=$((BASE_ADB_PORT + i * 2))
-            echo "Setting up port forwarding for emulator $i: console=$CONSOLE_PORT, adb=$ADB_PORT"
-            socat tcp-listen:"$CONSOLE_PORT",bind="$LOCAL_IP",fork tcp:127.0.0.1:"$CONSOLE_PORT" &
-            socat tcp-listen:"$ADB_PORT",bind="$LOCAL_IP",fork tcp:127.0.0.1:"$ADB_PORT" &
-        done
-        echo "Port forwarding setup complete for IP: $LOCAL_IP"
-    else
-        echo "Warning: Could not determine container IP for port forwarding"
-    fi
-else
-    echo "Not in container environment, skipping port forwarding"
-fi
 
 # Check if system image is installed
 if ! sdkmanager --list_installed | grep -q "$PACKAGE_PATH"; then
@@ -106,8 +99,9 @@ if [ "$OPT_SKIP_AUTH" == "true" ]; then
     AUTH_FLAG="-skip-adb-auth"
 fi
 
-# Array to store emulator PIDs
+# Array to store emulator PIDs and socat PIDs
 declare -a EMULATOR_PIDS
+declare -a SOCAT_PIDS
 
 # Cleanup function
 cleanup() {
@@ -116,10 +110,66 @@ cleanup() {
     for pid in "${EMULATOR_PIDS[@]}"; do
         [ ! -z "$pid" ] && kill "$pid" 2>/dev/null || true
     done
+    for pid in "${SOCAT_PIDS[@]}"; do
+        [ ! -z "$pid" ] && kill "$pid" 2>/dev/null || true
+    done
     pkill -f "socat.*tcp-listen" 2>/dev/null || true
     exit 0
 }
 trap cleanup EXIT INT TERM
+
+# Function to wait for a port to be listening
+wait_for_port() {
+    local port=$1
+    local timeout=${2:-30}
+    local elapsed=0
+    
+    echo "Waiting for port $port to be available..."
+    while ! ss -tln | grep -q ":$port "; do
+        sleep 1
+        ((elapsed++))
+        if [ $elapsed -ge $timeout ]; then
+            echo "ERROR: Timeout waiting for port $port after ${timeout}s"
+            return 1
+        fi
+    done
+    echo "Port $port is now available"
+    return 0
+}
+
+# Function to setup port forwarding for a specific emulator
+setup_port_forwarding() {
+    local console_port=$1
+    local adb_port=$2
+    local local_ip=$3
+    
+    echo ""
+    echo "=== Setting up port forwarding for console=$console_port, adb=$adb_port ==="
+    
+    # Wait for both ports to be listening
+    wait_for_port $console_port 60 || return 1
+    wait_for_port $adb_port 60 || return 1
+    
+    # Set up socat forwarding with fork and reuseaddr
+    echo "Starting socat for console port $console_port..."
+    socat tcp-listen:"$console_port",bind="$local_ip",fork,reuseaddr tcp:127.0.0.1:"$console_port" &
+    SOCAT_PIDS+=($!)
+    
+    echo "Starting socat for ADB port $adb_port..."
+    socat tcp-listen:"$adb_port",bind="$local_ip",fork,reuseaddr tcp:127.0.0.1:"$adb_port" &
+    SOCAT_PIDS+=($!)
+    
+    # Verify socat processes started
+    sleep 1
+    if ps -p ${SOCAT_PIDS[-2]} > /dev/null && ps -p ${SOCAT_PIDS[-1]} > /dev/null; then
+        echo "✓ Port forwarding active: $local_ip:$console_port -> 127.0.0.1:$console_port"
+        echo "✓ Port forwarding active: $local_ip:$adb_port -> 127.0.0.1:$adb_port"
+        return 0
+    else
+        echo "ERROR: Failed to start socat processes"
+        return 1
+    fi
+}
 
 # Create AVD
 create_avd() {
@@ -190,8 +240,18 @@ start_emulator() {
     $EMULATOR_CMD &
     local emulator_pid=$!
     EMULATOR_PIDS[$instance_num]=$emulator_pid
-    wait_for_boot $console_port &
     echo "Emulator instance $instance_num started with PID $emulator_pid"
+    
+    # Wait for emulator to boot completely
+    echo "Waiting for emulator instance $instance_num to boot..."
+    wait_for_boot $console_port
+    
+    # Setup port forwarding after emulator is ready
+    if [ "$ENABLE_PORT_FORWARDING" = true ]; then
+        setup_port_forwarding $console_port $adb_port "$LOCAL_IP"
+    fi
+    
+    echo "✓ Emulator instance $instance_num is fully ready!"
 }
 
 # Main
@@ -208,11 +268,30 @@ for i in $(seq 0 $((NUM_EMULATORS - 1))); do
     create_avd "$AVD_NAME"
     start_emulator "$AVD_NAME" "$CONSOLE_PORT" "$ADB_PORT" "$i"
     if [ "$NUM_EMULATORS" -gt 1 ] && [ "$i" -lt $((NUM_EMULATORS - 1)) ]; then
+        echo ""
+        echo "Waiting 5 seconds before starting next emulator..."
         sleep 5
     fi
 done
 
 echo ""
+echo "========================================="
 echo "All emulator instances started successfully!"
+echo "========================================="
+echo ""
+echo "Active emulators:"
+adb devices
+echo ""
+if [ "$ENABLE_PORT_FORWARDING" = true ]; then
+    echo "Port forwarding active on IP: $LOCAL_IP"
+    echo "Forwarded ports:"
+    for i in $(seq 0 $((NUM_EMULATORS - 1))); do
+        CONSOLE_PORT=$((BASE_CONSOLE_PORT + i * 2))
+        ADB_PORT=$((BASE_ADB_PORT + i * 2))
+        echo "  Emulator $i: console=$LOCAL_IP:$CONSOLE_PORT, adb=$LOCAL_IP:$ADB_PORT"
+    done
+fi
+echo ""
+
 update_state "ANDROID_RUNNING"
 wait
