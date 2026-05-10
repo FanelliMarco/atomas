@@ -22,6 +22,19 @@ pub struct CircleDetectionConfig {
     pub max_radius: i32,
     pub blur_kernel_size: i32,
     pub preprocessing: PreprocessingMethod,
+
+    /// IoU threshold for non-maximum suppression on detected circles.
+    /// Two circles whose bounding boxes overlap by more than this ratio are
+    /// considered duplicates and the one with the worse color match is dropped.
+    /// Typical range: 0.2 (aggressive) – 0.5 (permissive). 0.3 is a good default.
+    pub nms_iou_threshold: f64,
+
+    /// If > 0, NMS will additionally suppress any pair of circles whose
+    /// centers are closer than `min(r_a, r_b) * nms_center_distance_ratio`
+    /// pixels apart, regardless of bbox-IoU. This catches concentric circles
+    /// at very different radii (e.g. a ring atom + a halo around it) that
+    /// IoU alone may not flag. Set to 0.0 to disable.
+    pub nms_center_distance_ratio: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,6 +124,8 @@ impl Default for CircleDetectionConfig {
             max_radius: 80,
             blur_kernel_size: 9,
             preprocessing: PreprocessingMethod::GaussianBlur,
+            nms_iou_threshold: 0.3,
+            nms_center_distance_ratio: 0.6,
         }
     }
 }
@@ -129,6 +144,7 @@ impl Default for ColorMatchingConfig {
 }
 
 impl DetectionConfig {
+    /// Tuned for small atoms (e.g. ring elements at lower zoom).
     pub fn for_small_atoms() -> Self {
         let mut c = Self::default();
         c.circle_detection.min_radius = 10;
@@ -138,6 +154,7 @@ impl DetectionConfig {
         c
     }
 
+    /// Tuned for large atoms (e.g. central player atom).
     pub fn for_large_atoms() -> Self {
         let mut c = Self::default();
         c.circle_detection.min_radius = 40;
@@ -146,6 +163,8 @@ impl DetectionConfig {
         c
     }
 
+    /// More permissive Hough thresholds — finds more circles but also more
+    /// false positives. NMS downstream handles the duplicates.
     pub fn high_sensitivity() -> Self {
         let mut c = Self::default();
         c.circle_detection.param1 = 40.0;
@@ -154,32 +173,46 @@ impl DetectionConfig {
         c
     }
 
+    /// Stricter Hough thresholds — only confident circles get through.
     pub fn low_sensitivity() -> Self {
         let mut c = Self::default();
         c.circle_detection.param1 = 70.0;
-        c.circle_detection.param2 = 40.0;
-        c.circle_detection.min_dist = 50.0;
+        c.circle_detection.param2 = 35.0;
+        c.circle_detection.min_dist = 45.0;
         c
     }
 
+    /// Baseline preset emphasizing color-match accuracy: brightness-normalized
+    /// HSV comparison with tighter color tolerance. This is the first config
+    /// `parser.rs` tries and the fallback if all others fail.
+    ///
+    /// Hough radius is clamped tightly:
+    ///   - `min_radius: 24` filters small UI badges like the `+Sm` indicator
+    ///     in the HUD (observed at r=23) without losing real atoms (r ≥ 25).
+    ///   - `max_radius: 35` filters the larger halo that Hough sometimes
+    ///     finds around the next-atom preview (observed at r ≈ 45). Real
+    ///     ring atoms and the player atom both come in at r ≈ 26-27, so
+    ///     this leaves a comfortable margin.
     pub fn accurate_color_matching() -> Self {
         let mut c = Self::default();
         c.color_matching.use_hsv = true;
-        c.color_matching.method = ColorMatchMethod::Mean;
-        c.color_matching.tolerance = 0.20;
+        c.color_matching.tolerance = 0.18;
         c.color_matching.hue_weight = 3.0;
         c.color_matching.saturation_weight = 1.5;
         c.color_matching.value_weight = 0.2;
-        c.circle_detection.param2 = 28.0;
-        c.circle_detection.min_dist = 35.0;
+        c.circle_detection.min_radius = 24;
+        c.circle_detection.max_radius = 35;
         c
     }
 
+    /// Adds CLAHE preprocessing to bring out edges in low-contrast screenshots
+    /// (e.g. when the game's dark vignette suppresses atom outlines). Useful
+    /// when the default and high-sensitivity presets both miss circles.
     pub fn high_contrast() -> Self {
         let mut c = Self::default();
-        c.color_matching.use_hsv = false;
-        c.color_matching.tolerance = 40.0;
-        c.color_matching.method = ColorMatchMethod::Median;
+        c.circle_detection.preprocessing = PreprocessingMethod::CLAHE;
+        c.circle_detection.param1 = 60.0;
+        c.circle_detection.param2 = 30.0;
         c
     }
 }
