@@ -2,9 +2,9 @@
 -\-_Minus\-66,119,195
 /\-_Merge\-66,119,195
 *\-_Clone\-66,119,195
-H\-Hydrogen\-99,185,213
-He\-Helium\-209,201,145
-Li\-Lithium\-76,97,104
+H\-Hydrogen\-98,158,182
+He\-Helium\-189,175,130
+Li\-Lithium\-81,88,96
 Be\-Beryllium\-200,200,200
 B\-Boron\-125,83,83
 C\-Carbon\-59,59,59

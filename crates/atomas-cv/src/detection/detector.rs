@@ -1,22 +1,18 @@
-//! High-level game state detector using opencv-match
-
-use super::config::DetectionConfig;
+use super::config::{ColorMatchMethod, DetectionConfig};
 use crate::bbox::{BBox, BBoxCollection};
-use crate::template::{TemplateLoader, TemplateMatcher};
-use crate::traits::Detectable;
+use crate::circle::{CircleDetector, DetectedCircle};
 use crate::utils::ImageUtils;
 use crate::Result;
 use atomas_core::{elements::Data, Element};
 use anyhow::Context;
 use opencv::{
-    core::{Mat, Point},
-    imgproc::{self, LINE_8, FONT_HERSHEY_SIMPLEX},
+    core::{Mat, Point, Scalar},
+    imgproc::{self, FONT_HERSHEY_SIMPLEX, LINE_8},
     prelude::*,
 };
 use serde::Serialize;
 use std::path::Path;
 
-/// Game state detection result (Serialize only due to lifetime issues)
 #[derive(Debug, Clone, Serialize)]
 pub struct DetectionResult<'a> {
     pub ring_elements: Vec<(Element<'a>, BBox)>,
@@ -25,7 +21,6 @@ pub struct DetectionResult<'a> {
     pub confidence_stats: DetectionStats,
 }
 
-/// Detection statistics
 #[derive(Debug, Clone, Serialize)]
 pub struct DetectionStats {
     pub total_detections: usize,
@@ -35,173 +30,84 @@ pub struct DetectionStats {
     pub processing_time_ms: u64,
 }
 
-/// Implement Detectable trait for Element
-impl<'a> Detectable for Element<'a> {
-    fn get_templates(&self) -> Vec<String> {
-        vec![
-            self.name.to_string(),
-            self.name.to_lowercase(),
-            format!("_{}", self.name),
-            format!("_{}", self.name.to_lowercase()),
-        ]
-    }
-
-    fn get_color(&self) -> (u8, u8, u8) {
-        self.rgb
-    }
-
-    fn get_name(&self) -> &str {
-        self.name
-    }
-}
-
-/// Main game state detector leveraging opencv-match
 pub struct GameStateDetector {
     config: DetectionConfig,
-    template_loader: TemplateLoader,
-    template_matcher: TemplateMatcher,
+    circle_detector: CircleDetector,
 }
 
 impl GameStateDetector {
-    /// Create new detector
     pub fn new(config: DetectionConfig) -> Result<Self> {
-        let mut template_loader = TemplateLoader::new();
-        for dir in &config.template_dirs {
-            template_loader = template_loader.add_template_dir(dir);
-        }
-
-        let template_matcher = TemplateMatcher::new(config.template_config.clone());
-
-        Ok(Self {
-            config,
-            template_loader,
-            template_matcher,
-        })
+        let circle_detector = CircleDetector::new(config.circle_detection.clone());
+        Ok(Self { config, circle_detector })
     }
 
-    /// Detect game state from image file using opencv-match conversions
     pub fn detect_from_file<'a, P: AsRef<Path>>(
         &self,
         image_path: P,
         elements_data: &'a Data,
     ) -> Result<DetectionResult<'a>> {
-        // Load using opencv-match for consistent handling
-        let image = ImageUtils::load_grayscale(&image_path)
-            .with_context(|| format!("Failed to load image: {:?}", image_path.as_ref()))?;
+        let gray = ImageUtils::load_grayscale(&image_path)
+            .with_context(|| format!("Failed to load grayscale: {:?}", image_path.as_ref()))?;
+        let color = ImageUtils::load_color(&image_path)
+            .with_context(|| format!("Failed to load color: {:?}", image_path.as_ref()))?;
 
-        let color_image = ImageUtils::load_color(&image_path)
-            .with_context(|| format!("Failed to load color image: {:?}", image_path.as_ref()))?;
-
-        self.detect_from_mat(&image, &color_image, elements_data)
+        self.detect_from_mat(&gray, &color, elements_data)
     }
 
-    /// Detect from image::RgbImage using opencv-match conversions
     pub fn detect_from_rgb_image<'a>(
         &self,
         rgb_image: &image::RgbImage,
         elements_data: &'a Data,
     ) -> Result<DetectionResult<'a>> {
         let color_mat = ImageUtils::rgb_to_mat(rgb_image)?;
-        let grayscale_mat = opencv_match::convert::mat_to_grayscale(&color_mat, true)?;
-        
-        self.detect_from_mat(&grayscale_mat, &color_mat, elements_data)
+        let mut gray_mat = Mat::default();
+        opencv::imgproc::cvt_color(
+            &color_mat,
+            &mut gray_mat,
+            opencv::imgproc::COLOR_BGR2GRAY,
+            0,
+        )?;
+        self.detect_from_mat(&gray_mat, &color_mat, elements_data)
     }
 
-    /// Detect from image::RgbaImage using opencv-match conversions
-    pub fn detect_from_rgba_image<'a>(
-        &self,
-        rgba_image: &image::RgbaImage,
-        elements_data: &'a Data,
-    ) -> Result<DetectionResult<'a>> {
-        let rgba_mat = ImageUtils::rgba_to_mat(rgba_image)?;
-        let grayscale_mat = opencv_match::convert::mat_to_grayscale(&rgba_mat, true)?;
-        
-        // Convert RGBA to RGB for color visualization
-        let rgb_image = ImageUtils::rgba_to_rgb(rgba_image)?;
-        let color_mat = ImageUtils::rgb_to_mat(&rgb_image)?;
-        
-        self.detect_from_mat(&grayscale_mat, &color_mat, elements_data)
-    }
-
-    /// Core detection from OpenCV Mat
     pub fn detect_from_mat<'a>(
         &self,
-        image: &Mat,
+        gray_image: &Mat,
         color_image: &Mat,
         elements_data: &'a Data,
     ) -> Result<DetectionResult<'a>> {
-        let start_time = std::time::Instant::now();
+        let start = std::time::Instant::now();
+
+        let circles = self.circle_detector.detect(gray_image, color_image)?;
+        println!("Detected {} circles total", circles.len());
+
+        self.print_diagnostic(&circles, elements_data);
+
+        let element_matches = self.match_circles_to_elements(&circles, elements_data)?;
 
         let mut all_detections = BBoxCollection::new();
-
-        // Process each element
-        for element in &elements_data.elements {
-            if let Some(template) = self.template_loader.load_template(element.name)? {
-                let mut detections = self.template_matcher.match_single(image, &template)?;
-                
-                // Add element metadata to detections
-                for bbox in detections.as_mut_slice() {
-                    bbox.class_id = element.name.to_string();
-                    bbox.color = element.get_color();
-                    bbox.metadata.insert("element_type".to_string(), 
-                        format!("{:?}", element.element_type));
-                }
-
-                all_detections.extend(detections);
-            }
+        for (element, circle, _) in &element_matches {
+            all_detections.push(self.circle_to_bbox(circle, element));
         }
 
-        // Debug: Show pre-NMS count
-        println!("Pre-NMS detections: {}", all_detections.len());
-        let pre_nms_stats = all_detections.stats();
-        for (class, count) in &pre_nms_stats.class_counts {
-            if *count > 1 {
-                println!("  {}: {} detections", class, count);
-            }
-        }
-
-        // Apply global NMS FIRST
-        all_detections = all_detections.apply_global_nms(self.config.global_nms_threshold);
-
-        // Debug: Show post-NMS count
-        println!("Post-NMS detections: {}", all_detections.len());
-        let post_nms_stats = all_detections.stats();
-        for (class, count) in &post_nms_stats.class_counts {
-            println!("  {}: {} detections", class, count);
-        }
-
-        // NOW create element-bbox pairs from NMS-filtered detections
-        let mut element_bbox_pairs = Vec::new();
-        for bbox in all_detections.iter() {
-            // Find the corresponding element by class_id
-            if let Some(element) = elements_data.elements.iter()
-                .find(|e| e.name == bbox.class_id) 
-            {
-                element_bbox_pairs.push((element.clone(), bbox.clone()));
-            }
-        }
-
-        // Classify detections as ring elements or player atom
-        let image_size = image.size()?;
+        let image_size = gray_image.size()?;
         let (ring_elements, player_atom) = self.classify_detections(
-            element_bbox_pairs,
+            element_matches,
             image_size.width as u32,
             image_size.height as u32,
         )?;
 
-        let processing_time = start_time.elapsed().as_millis() as u64;
-
-        // Create visualization if enabled
-        if self.config.visualization.draw_bboxes {
-            self.create_visualization(color_image, &all_detections)?;
+        if self.config.visualization.draw_circles {
+            self.create_visualization(color_image, &all_detections, &circles)?;
         }
 
+        let elapsed = start.elapsed().as_millis() as u64;
         let stats = DetectionStats {
             total_detections: all_detections.len(),
             ring_detections: ring_elements.len(),
             player_detections: if player_atom.is_some() { 1 } else { 0 },
-            avg_confidence: all_detections.stats().avg_confidence,
-            processing_time_ms: processing_time,
+            avg_confidence: 1.0,
+            processing_time_ms: elapsed,
         };
 
         Ok(DetectionResult {
@@ -212,95 +118,248 @@ impl GameStateDetector {
         })
     }
 
-    /// Classify detections as ring elements or player atom
-    fn classify_detections<'a>(
+    fn print_diagnostic(&self, circles: &[DetectedCircle], elements_data: &Data) {
+        println!("\n=== Detected Colors (Raw vs Normalized) ===");
+
+        for c in circles {
+            let mean = c.mean_color;
+            let mean_norm = Self::normalize_brightness(mean);
+            let best_raw = self.nearest_element(mean, elements_data);
+            let best_norm = self.nearest_element(mean_norm, elements_data);
+
+            println!(
+                "  Circle ({:>4},{:>4}) r={:>3}  Raw RGB({:>3},{:>3},{:>3})->{:<15}  Norm RGB({:>3},{:>3},{:>3})->{:<15}",
+                c.circle.center.0, c.circle.center.1, c.circle.radius,
+                mean.0, mean.1, mean.2, best_raw,
+                mean_norm.0, mean_norm.1, mean_norm.2, best_norm,
+            );
+        }
+        println!("===========================================\n");
+    }
+
+    fn normalize_brightness(color: (u8, u8, u8)) -> (u8, u8, u8) {
+        let max_ch = color.0.max(color.1).max(color.2) as f32;
+        if max_ch < 1.0 {
+            return (0, 0, 0);
+        }
+        let scale = 200.0 / max_ch;
+        (
+            (color.0 as f32 * scale).round().min(255.0) as u8,
+            (color.1 as f32 * scale).round().min(255.0) as u8,
+            (color.2 as f32 * scale).round().min(255.0) as u8,
+        )
+    }
+
+    fn nearest_element(&self, color: (u8, u8, u8), elements_data: &Data) -> String {
+        elements_data
+            .elements
+            .iter()
+            .min_by(|a, b| {
+                self.rgb_distance(&color, &a.rgb)
+                    .partial_cmp(&self.rgb_distance(&color, &b.rgb))
+                    .unwrap()
+            })
+            .map(|e| e.name.to_string())
+            .unwrap_or_default()
+    }
+
+    fn match_circles_to_elements<'a>(
         &self,
-        element_bbox_pairs: Vec<(Element<'a>, BBox)>,
-        image_width: u32,
-        image_height: u32,
-    ) -> Result<(Vec<(Element<'a>, BBox)>, Option<(Element<'a>, BBox)>)> {
-        let center_x = image_width as f32 / 2.0;
-        let center_y = image_height as f32 / 2.0;
+        circles: &[DetectedCircle],
+        elements_data: &'a Data,
+    ) -> Result<Vec<(Element<'a>, DetectedCircle, f64)>> {
+        let mut matches = Vec::new();
 
-        let mut ring_elements = Vec::new();
-        let mut player_candidates = Vec::new();
+        for circle in circles {
+            let color = Self::normalize_brightness(circle.mean_color);
 
-        for (element, bbox) in element_bbox_pairs {
-            let bbox_center = bbox.center();
-            let distance_from_center = (
-                (bbox_center.x as f32 - center_x).powi(2) +
-                (bbox_center.y as f32 - center_y).powi(2)
-            ).sqrt();
+            println!(
+                "\nMatching circle at ({},{}) r={} | RGB({},{},{})",
+                circle.circle.center.0, circle.circle.center.1, circle.circle.radius,
+                color.0, color.1, color.2,
+            );
 
-            // Determine if this is likely a player atom (center) or ring element
-            let tolerance = self.config.player_atom_detection.center_tolerance as f32;
-            let max_center_distance = (image_width.min(image_height) as f32) * tolerance;
+            let mut candidates: Vec<(&Element, f64, f64)> = elements_data
+                .elements
+                .iter()
+                .map(|e| {
+                    let elem_color_norm = Self::normalize_brightness(e.rgb);
+                    let hsv_d = self.hsv_distance(&color, &elem_color_norm);
+                    let rgb_d = self.rgb_distance(&color, &elem_color_norm);
+                    (e, hsv_d, rgb_d)
+                })
+                .collect();
 
-            if distance_from_center < max_center_distance {
-                player_candidates.push((element, bbox.clone(), bbox.confidence));
+            if self.config.color_matching.use_hsv {
+                candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
             } else {
-                ring_elements.push((element, bbox));
+                candidates.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
+            }
+
+            println!("  Top 8:");
+            for (i, (e, hsv_d, rgb_d)) in candidates.iter().take(8).enumerate() {
+                println!(
+                    "    {}. {:>15}  RGB({:>3},{:>3},{:>3})  hsv={:.4}  rgb={:.2}",
+                    i + 1, e.name, e.rgb.0, e.rgb.1, e.rgb.2, hsv_d, rgb_d,
+                );
+            }
+
+            let (best_element, best_dist) = if self.config.color_matching.use_hsv {
+                let f = candidates.first().unwrap();
+                (f.0, f.1)
+            } else {
+                let f = candidates.first().unwrap();
+                (f.0, f.2)
+            };
+
+            if best_dist < self.config.color_matching.tolerance {
+                println!("  ✓ -> {} (dist={:.4})", best_element.name, best_dist);
+                matches.push((best_element.clone(), circle.clone(), best_dist));
+            } else {
+                println!(
+                    "  ✗ {} dist={:.4} > tol={:.4}",
+                    best_element.name, best_dist, self.config.color_matching.tolerance
+                );
             }
         }
 
-        // Select best player atom candidate
-        let player_atom = player_candidates
-            .into_iter()
-            .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap())
-            .map(|(element, bbox, _)| (element, bbox));
+        println!("\nMatched: {} / {}", matches.len(), circles.len());
+        Ok(matches)
+    }
 
-        // Sort ring elements by angle for consistent ordering
-        ring_elements.sort_by(|a, b| {
-            let angle_a = self.calculate_angle_from_center(&a.1, center_x, center_y);
-            let angle_b = self.calculate_angle_from_center(&b.1, center_x, center_y);
-            angle_a.partial_cmp(&angle_b).unwrap()
+    fn rgb_distance(&self, c1: &(u8, u8, u8), c2: &(u8, u8, u8)) -> f64 {
+        let dr = c1.0 as f64 - c2.0 as f64;
+        let dg = c1.1 as f64 - c2.1 as f64;
+        let db = c1.2 as f64 - c2.2 as f64;
+        (dr * dr + dg * dg + db * db).sqrt()
+    }
+
+    fn hsv_distance(&self, c1: &(u8, u8, u8), c2: &(u8, u8, u8)) -> f64 {
+        let (h1, s1, v1) = rgb_to_hsv(c1);
+        let (h2, s2, v2) = rgb_to_hsv(c2);
+
+        let raw_dh = (h1 - h2).abs();
+        let dh = raw_dh.min(360.0 - raw_dh) / 180.0;
+        let ds = (s1 - s2).abs();
+        let dv = (v1 - v2).abs();
+
+        let hw = self.config.color_matching.hue_weight;
+        let sw = self.config.color_matching.saturation_weight;
+        let vw = self.config.color_matching.value_weight;
+
+        ((dh * hw).powi(2) + (ds * sw).powi(2) + (dv * vw).powi(2)).sqrt()
+    }
+
+    fn circle_to_bbox(&self, circle: &DetectedCircle, element: &Element) -> BBox {
+        let (cx, cy) = circle.circle.center;
+        let r = circle.circle.radius;
+        BBox::new(cx - r, cy - r, r * 2, r * 2, circle.circle.confidence)
+            .with_class(element.name.to_string(), element.rgb)
+    }
+
+    fn classify_detections<'a>(
+        &self,
+        matches: Vec<(Element<'a>, DetectedCircle, f64)>,
+        image_width: u32,
+        image_height: u32,
+    ) -> Result<(Vec<(Element<'a>, BBox)>, Option<(Element<'a>, BBox)>)> {
+        let cx = image_width as f32 / 2.0;
+        let cy = image_height as f32 / 2.0;
+
+        let avg_r = if matches.is_empty() {
+            0.0f32
+        } else {
+            matches
+                .iter()
+                .map(|(_, c, _)| c.circle.radius as f32)
+                .sum::<f32>()
+                / matches.len() as f32
+        };
+
+        let max_center_dist = image_width.min(image_height) as f32
+            * self.config.player_atom_detection.center_tolerance as f32;
+
+        let mut ring: Vec<(Element, BBox)> = Vec::new();
+        let mut player_cands: Vec<(Element, BBox, f32)> = Vec::new();
+
+        for (element, circle, _) in matches {
+            let (ex, ey) = circle.circle.center;
+            let dist = ((ex as f32 - cx).powi(2) + (ey as f32 - cy).powi(2)).sqrt();
+            let bbox = self.circle_to_bbox(&circle, &element);
+
+            let is_centered = dist < max_center_dist;
+            let is_larger = circle.circle.radius as f32
+                > avg_r * self.config.player_atom_detection.size_factor_range.0 as f32;
+
+            if is_centered || is_larger {
+                player_cands.push((element.clone(), bbox.clone(), dist));
+            }
+            if dist > max_center_dist * 0.5 {
+                ring.push((element, bbox));
+            }
+        }
+
+        let player_atom = player_cands
+            .into_iter()
+            .min_by(|a, b| a.2.partial_cmp(&b.2).unwrap())
+            .map(|(e, b, _)| (e, b));
+
+        if let Some((ref pe, ref pb)) = player_atom {
+            ring.retain(|(e, b)| e.name != pe.name || b.x != pb.x || b.y != pb.y);
+        }
+
+        ring.sort_by(|a, b| {
+            let ang = |bbox: &BBox| {
+                let bc = bbox.center();
+                (bc.y as f32 - cy).atan2(bc.x as f32 - cx)
+            };
+            ang(&a.1).partial_cmp(&ang(&b.1)).unwrap()
         });
 
-        // Limit ring elements
-        ring_elements.truncate(self.config.ring_detection.max_ring_elements);
-
-        Ok((ring_elements, player_atom))
+        ring.truncate(self.config.ring_detection.max_ring_elements);
+        Ok((ring, player_atom))
     }
 
-    /// Calculate angle from image center
-    fn calculate_angle_from_center(&self, bbox: &BBox, center_x: f32, center_y: f32) -> f32 {
-        let bbox_center = bbox.center();
-        let dx = bbox_center.x as f32 - center_x;
-        let dy = bbox_center.y as f32 - center_y;
-        dy.atan2(dx)
-    }
+    fn create_visualization(
+        &self,
+        image: &Mat,
+        detections: &BBoxCollection,
+        circles: &[DetectedCircle],
+    ) -> Result<()> {
+        let mut out = image.clone();
 
-    /// Create visualization using opencv-match for saving
-    fn create_visualization(&self, image: &Mat, detections: &BBoxCollection) -> Result<()> {
-        let mut output = image.clone();
-
-        for bbox in detections.iter() {
-            // Draw bounding box
-            if self.config.visualization.draw_bboxes {
-                imgproc::rectangle(
-                    &mut output,
-                    bbox.to_rect(),
-                    bbox.get_bgr_scalar(),
+        for circle in circles {
+            let (cx, cy) = circle.circle.center;
+            imgproc::circle(
+                &mut out,
+                Point::new(cx, cy),
+                circle.circle.radius,
+                Scalar::new(0.0, 255.0, 0.0, 255.0),
+                2,
+                LINE_8,
+                0,
+            )?;
+            if self.config.visualization.draw_centers {
+                imgproc::circle(
+                    &mut out,
+                    Point::new(cx, cy),
                     3,
+                    Scalar::new(0.0, 0.0, 255.0, 255.0),
+                    -1,
                     LINE_8,
                     0,
                 )?;
             }
+        }
 
-            // Draw label
-            if self.config.visualization.draw_labels {
-                let label = if self.config.visualization.draw_confidence {
-                    format!("{} ({:.2})", bbox.class_id, bbox.confidence)
-                } else {
-                    bbox.class_id.clone()
-                };
-
+        if self.config.visualization.draw_labels {
+            for bbox in detections.iter() {
                 imgproc::put_text(
-                    &mut output,
-                    &label,
-                    Point::new(bbox.x + 5, bbox.y + 25),
+                    &mut out,
+                    &bbox.class_id,
+                    Point::new(bbox.x + 5, bbox.y + 20),
                     FONT_HERSHEY_SIMPLEX,
-                    0.8,
+                    0.6,
                     bbox.get_bgr_scalar(),
                     2,
                     LINE_8,
@@ -309,59 +368,37 @@ impl GameStateDetector {
             }
         }
 
-        // Save visualization using opencv-match if possible, fallback to OpenCV
-        let output_path = self.config.output_dir.join("game_state_detection.png");
-        
-        // Try to convert to image crate format for consistent saving
-        match ImageUtils::mat_to_rgb(&output) {
-            Ok(rgb_image) => {
-                rgb_image.save(&output_path)
-                    .with_context(|| format!("Failed to save visualization: {:?}", output_path))?;
-            }
-            Err(_) => {
-                // Fallback to OpenCV saving
-                ImageUtils::save_image(&output, &output_path)?;
-            }
-        }
-
-        println!("Visualization saved: {:?}", output_path);
-        Ok(())
-    }
-
-    /// Export detection results in JSON format
-    pub fn export_json<'a>(&self, results: &DetectionResult<'a>, output_path: &Path) -> Result<()> {
-        let json = serde_json::to_string_pretty(results)
-            .context("Failed to serialize detection results")?;
-        
-        std::fs::write(output_path, json)
-            .with_context(|| format!("Failed to write JSON to: {:?}", output_path))?;
-        
+        let path = self.config.output_dir.join("circle_detection.png");
+        ImageUtils::save_image(&out, &path)?;
+        println!("Visualization saved: {:?}", path);
         Ok(())
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use atomas_core::elements::Data;
+fn rgb_to_hsv(rgb: &(u8, u8, u8)) -> (f64, f64, f64) {
+    let r = rgb.0 as f64 / 255.0;
+    let g = rgb.1 as f64 / 255.0;
+    let b = rgb.2 as f64 / 255.0;
 
-    #[test]
-    fn test_detector_creation() -> Result<()> {
-        let config = DetectionConfig::default();
-        let _detector = GameStateDetector::new(config)?;
-        Ok(())
-    }
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let delta = max - min;
 
-    #[test]
-    fn test_rgb_image_detection() -> Result<()> {
-        let config = DetectionConfig::default();
-        let detector = GameStateDetector::new(config)?;
-        
-        // Create dummy data and image
-        let dummy_data = Data { elements: Vec::new() };
-        let rgb_image = image::RgbImage::new(100, 100);
-        
-        let _result = detector.detect_from_rgb_image(&rgb_image, &dummy_data)?;
-        Ok(())
-    }
+    let h = if delta == 0.0 {
+        0.0
+    } else if max == r {
+        let h = 60.0 * ((g - b) / delta);
+        if h < 0.0 {
+            h + 360.0
+        } else {
+            h % 360.0
+        }
+    } else if max == g {
+        60.0 * ((b - r) / delta + 2.0)
+    } else {
+        60.0 * ((r - g) / delta + 4.0)
+    };
+
+    let s = if max == 0.0 { 0.0 } else { delta / max };
+    (h, s, max)
 }

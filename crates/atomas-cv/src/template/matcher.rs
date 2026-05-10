@@ -2,7 +2,6 @@
 
 use super::{Template, TemplateConfig, PreprocessingMethod};
 use crate::bbox::{BBox, BBoxCollection};
-use crate::traits::TemplateMatchable;
 use crate::utils::ImageUtils;
 use crate::Result;
 use anyhow::Context;
@@ -42,7 +41,7 @@ impl TemplateMatcher {
             let matches = self.match_template_single_scale(
                 &processed_image,
                 &scaled_template,
-                &template.image.size()?, // Original size for bbox
+                &template.image.size()?,
                 &template.name,
             )?;
             all_matches.extend(matches);
@@ -197,17 +196,14 @@ impl TemplateMatcher {
                 let confidence: f64 = *result_f64.at_2d(y, x)?;
 
                 let passes_threshold = if is_inverted {
-                    // For SQDIFF methods, lower is better
                     confidence <= self.config.threshold
                 } else {
-                    // For correlation methods, higher is better
                     confidence >= self.config.threshold
                 };
 
                 if passes_threshold {
-                    // Normalize confidence for inverted methods
                     let normalized_confidence = if is_inverted {
-                        1.0 - confidence // Convert to "higher is better"
+                        1.0 - confidence
                     } else {
                         confidence
                     };
@@ -290,19 +286,6 @@ impl TemplateMatcher {
         }
 
         Ok(results)
-    }
-}
-
-impl TemplateMatchable for TemplateMatcher {
-    fn match_template(&self, image: &Mat, template: &Mat, threshold: f64) -> Result<Vec<BBox>> {
-        let temp_template = Template::new("temp".to_string(), template.clone());
-        let mut temp_config = self.config.clone();
-        temp_config.threshold = threshold;
-        
-        let temp_matcher = TemplateMatcher::new(temp_config);
-        let matches = temp_matcher.match_single(image, &temp_template)?;
-        
-        Ok(matches.into_iter().collect())
     }
 }
 
