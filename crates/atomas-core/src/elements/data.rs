@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader};
 
 use crate::elements::element::Element;
 use crate::elements::id::Id;
-use crate::elements::types::ElementType;
+use crate::elements::types::{ElementType, SpecialAtom};
 
 #[derive(Debug)]
 pub struct Data<'a> {
@@ -29,6 +29,14 @@ impl Data<'static> {
         let reader = BufReader::new(file);
 
         let mut elements = Vec::new();
+        // Atomic number assigned by position among the *periodic* elements.
+        // The data file lists the special atoms (+, -, /, *) first, then the
+        // periodic table in order (H, He, Li, …), so a running counter over
+        // non-special rows yields the correct atomic number. The file carries
+        // no explicit number column, so without this every element would
+        // default to Periodic(1) — which silently breaks anything that relies
+        // on atomic number (e.g. gray-atom disambiguation in the detector).
+        let mut periodic_counter: u16 = 0;
 
         for (line_num, line) in reader.lines().enumerate() {
             let line = line
@@ -82,9 +90,25 @@ impl Data<'static> {
                 )
             })?;
 
+            let element_type = match id.as_str() {
+                "+" => ElementType::Special(SpecialAtom::Plus),
+                "-" => ElementType::Special(SpecialAtom::Minus),
+                "/" => ElementType::Special(SpecialAtom::DarkPlus),
+                "*" => ElementType::Special(SpecialAtom::Neutrino),
+                _ => {
+                    periodic_counter += 1;
+                    if periodic_counter <= 118 {
+                        ElementType::Periodic(periodic_counter as u8)
+                    } else {
+                        // 119+ are the game's "custom"/extended elements.
+                        ElementType::Custom(periodic_counter as u8)
+                    }
+                }
+            };
+
             let element = Element {
                 id: Id::from_chars(id.chars().collect::<Vec<char>>().as_slice()),
-                element_type: ElementType::Periodic(1), // Default to periodic for now
+                element_type,
                 name: Box::leak(name.into_boxed_str()),
                 rgb: (red, green, blue),
             };
