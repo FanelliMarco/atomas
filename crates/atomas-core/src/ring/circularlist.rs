@@ -60,12 +60,26 @@ impl<T: Clone + Debug> CircularList<T> {
     pub fn len(&self) -> usize {
         self.size
     }
+
+    pub fn push(&mut self, value: T) {
+        self.insert(value, self.size);
+    }
+    
+    pub fn is_empty(&self) -> bool {
+        self.size == 0
+    }
 }
 
 pub struct CircularListIterator<T: Clone> {
     current: Option<Rc<RefCell<Node<T>>>>,
     end: Option<Rc<RefCell<Node<T>>>>,
     first: bool,
+}
+
+impl<T: Clone + Debug> Default for CircularList<T> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<T: Clone + Debug> Iterator for CircularListIterator<T> {

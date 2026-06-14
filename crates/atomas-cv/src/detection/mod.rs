@@ -3,5 +3,5 @@
 pub mod config;
 pub mod detector;
 
-pub use config::DetectionConfig;
+pub use config::{DetectionConfig, ColorMatchingConfig};
 pub use detector::{GameStateDetector, DetectionResult};

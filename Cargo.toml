@@ -9,8 +9,20 @@ name = "atomas"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "milestone1"
+path = "src/milestone1_test.rs"
+
+[[bin]]
+name = "milestone2"
+path = "src/milestone2_test.rs"
+
 [dependencies]
 atomas-core = { path = "crates/atomas-core" }
 atomas-cv = { path = "crates/atomas-cv" }
 image = "0.25.6"
 rand = "0.9.1"
+anyhow = "1.0.98"
+clap = { version = "4.5", features = ["derive"] }
+log = "0.4"
+env_logger = "0.11"

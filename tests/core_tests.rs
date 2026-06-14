@@ -1,35 +1,30 @@
+// tests/core_tests.rs
 use atomas_core::{
-    elements::{Element, ElementType, SpecialAtom},
+    elements::{Element, Id, ElementType, SpecialAtom},
     ring::{CircularList, AdjMatrix},
 };
 
 #[test]
 fn test_adjmatrix() {
     let element = Element {
+        id: Id::Single('H'),
         element_type: ElementType::Periodic(1),
-        symbol: "H",
         name: "Hydrogen",
-        color: (255, 255, 255),
+        rgb: (255, 255, 255),
     };
+    
     let special = Element {
+        id: Id::Single('+'),
         element_type: ElementType::Special(SpecialAtom::Plus),
-        symbol: "+",
         name: "Plus",
-        color: (255, 255, 255),
-    };
-    let custom = Element {
-        element_type: ElementType::Custom(119),
-        symbol: "C",
-        name: "Carbon",
-        color: (255, 255, 255),
+        rgb: (255, 255, 255),
     };
 
     let mut ring = CircularList::new();
-    ring.push(element);
-    ring.push(special);
-    ring.push(custom);
+    ring.insert(element, 0);
+    ring.insert(special, 1);
 
-    let adjmatrix = AdjMatrix::new(&ring);
+    let mut adjmatrix = AdjMatrix::new(12);
+    adjmatrix.update_from_ring(&ring, &element);
     println!("{}", adjmatrix);
 }
-
