@@ -7,7 +7,7 @@ Atomas is a Rust AI helper that uses OpenCV to detect, parse, and analyze game s
 ## 📸 Visual Overview
 
 ### Input: Game Screenshot
-![Input](assets/jpg/board.jpg)
+![Input](assets/png/runtime/current_screen.png)
 
 ### Output: Detected Game State
 
