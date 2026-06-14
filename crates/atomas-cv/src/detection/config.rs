@@ -126,7 +126,7 @@ impl Default for CircleDetectionConfig {
     fn default() -> Self {
         Self {
             dp: 1.2,
-            min_dist: 35.0,
+            min_dist: 15.0,
             param1: 50.0,
             param2: 28.0,
             min_radius: 20,
@@ -222,7 +222,7 @@ impl DetectionConfig {
     pub fn accurate_color_matching() -> Self {
         let mut c = Self::default();
         c.color_matching.use_hsv = true;
-        c.color_matching.tolerance = 0.18;
+        c.color_matching.tolerance = 0.21;
         c.color_matching.hue_weight = 3.0;
         c.color_matching.saturation_weight = 1.5;
         c.color_matching.value_weight = 0.2;
@@ -245,3 +245,6 @@ impl DetectionConfig {
         c
     }
 }
+
+
+

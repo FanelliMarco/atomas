@@ -93,17 +93,37 @@ impl GameStateDetector {
     ) -> Result<DetectionResult<'a>> {
         let start = std::time::Instant::now();
 
-        // 1. Raw Hough circle detection.
-        let circles = self.circle_detector.detect(gray_image, color_image)?;
+        // 0. Sample the playfield background colour once; it powers both the
+        //    colour-contrast Hough pass (dark atoms like Carbon have no
+        //    luminance contrast against the maroon field) and ghost rejection.
+        let bg = self.sample_background(color_image).ok();
+        if let Some(bg) = bg {
+            println!("Estimated background RGB({},{},{})", bg.0, bg.1, bg.2);
+        }
+
+        // 1. Raw Hough circle detection (grayscale + chroma passes).
+        let circles = self.circle_detector.detect(gray_image, color_image, bg)?;
         println!("Detected {} raw circles", circles.len());
 
-        // 1b. Reject circles whose interior is just the playfield background.
-        //     Some boards render faint placement-hint / "ghost" circles over
-        //     empty playfield; their dark interior otherwise mislabels as a
-        //     dark element (Carbon, etc.). We sample the background colour
-        //     from the image corners and drop any circle close to it.
-        let circles = self.reject_background_circles(color_image, circles)?;
+        // 1b. Reject circles whose interior matches their local surroundings
+        //     (ghost/placement-hint circles over empty playfield).
+        let mut circles = self.reject_background_circles(bg, color_image, circles)?;
         println!("After background rejection: {} circles", circles.len());
+
+        // 1c. Blob recovery AFTER rejection: erase the surviving circles from
+        //     the chromaticity map and read leftover round blobs as atoms.
+        //     Running post-rejection means a doomed Hough circle can't shadow
+        //     a real atom out of recovery. Recovered circles face the same
+        //     ghost rejection before joining.
+        if bg.is_some() {
+            let recovered = self.circle_detector.recover_missing(color_image, &circles)?;
+            if !recovered.is_empty() {
+                let recovered =
+                    self.reject_background_circles(bg, color_image, recovered)?;
+                circles.extend(recovered);
+                println!("After blob recovery: {} circles", circles.len());
+            }
+        }
 
         self.print_diagnostic(&circles, elements_data);
 
@@ -247,42 +267,96 @@ impl GameStateDetector {
         Ok((rs[mid], gs[mid], bs[mid]))
     }
 
-    /// Drop circles whose interior colour matches the playfield background.
-    /// No-op when `bg_reject_threshold <= 0`.
+    /// Drop circles whose interior colour matches their LOCAL surroundings.
+    /// Ghost/placement-hint circles enclose bare playfield; real atoms differ
+    /// from the field around them. Comparing interior to a surrounding
+    /// annulus (instead of one global background colour) survives the
+    /// playfield vignette, whose mid-field is 20+ raw units away from any
+    /// corner-sampled global colour.
+    /// No-op when `bg_reject_threshold <= 0` or no background sample exists.
     fn reject_background_circles(
         &self,
+        bg: Option<(u8, u8, u8)>,
         color_image: &Mat,
         circles: Vec<DetectedCircle>,
     ) -> Result<Vec<DetectedCircle>> {
         let threshold = self.config.circle_detection.bg_reject_threshold;
-        if threshold <= 0.0 {
+        if threshold <= 0.0 || bg.is_none() {
             return Ok(circles);
         }
 
-        let bg = self.sample_background(color_image)?;
-        println!("Estimated background RGB({},{},{})", bg.0, bg.1, bg.2);
-
-        let kept: Vec<DetectedCircle> = circles
-            .into_iter()
-            .filter(|c| {
-                // Use the median interior colour — robust to the bright glyph
-                // text/number drawn over each atom.
-                let d = self.rgb_distance(&c.median_color, &bg);
-                if d < threshold {
-                    println!(
-                        "  drop ghost circle ({},{}) r={} RGB({},{},{}) bg_dist={:.1} < {:.1}",
-                        c.circle.center.0, c.circle.center.1, c.circle.radius,
-                        c.median_color.0, c.median_color.1, c.median_color.2,
-                        d, threshold,
-                    );
-                    false
-                } else {
-                    true
-                }
-            })
-            .collect();
+        let mut kept: Vec<DetectedCircle> = Vec::with_capacity(circles.len());
+        for c in circles {
+            let (cx, cy, r) = (c.circle.center.0, c.circle.center.1, c.circle.radius);
+            let local = self.sample_annulus_median(color_image, cx, cy, r + 8, r + 16)?;
+            let Some(local) = local else {
+                kept.push(c);
+                continue;
+            };
+            // Median interior colour — robust to the bright glyph drawn over
+            // each atom.
+            let d = self.rgb_distance(&c.median_color, &local);
+            if d < threshold {
+                println!(
+                    "  drop ghost circle ({},{}) r={} RGB({},{},{}) local_dist={:.1} < {:.1}",
+                    cx, cy, r,
+                    c.median_color.0, c.median_color.1, c.median_color.2,
+                    d, threshold,
+                );
+            } else {
+                kept.push(c);
+            }
+        }
 
         Ok(kept)
+    }
+
+    /// Median colour of the annulus r_in..r_out around (cx, cy), clipped to
+    /// the image. Returns None when too few pixels are sampled.
+    fn sample_annulus_median(
+        &self,
+        color_image: &Mat,
+        cx: i32,
+        cy: i32,
+        r_in: i32,
+        r_out: i32,
+    ) -> Result<Option<(u8, u8, u8)>> {
+        let w = color_image.cols();
+        let h = color_image.rows();
+        let x0 = (cx - r_out).max(0);
+        let y0 = (cy - r_out).max(0);
+        let x1 = (cx + r_out).min(w - 1);
+        let y1 = (cy + r_out).min(h - 1);
+
+        let r_in2 = (r_in * r_in) as i64;
+        let r_out2 = (r_out * r_out) as i64;
+        let mut rs: Vec<u8> = Vec::new();
+        let mut gs: Vec<u8> = Vec::new();
+        let mut bs: Vec<u8> = Vec::new();
+
+        for row in y0..=y1 {
+            for col in x0..=x1 {
+                let dx = (col - cx) as i64;
+                let dy = (row - cy) as i64;
+                let d2 = dx * dx + dy * dy;
+                if d2 < r_in2 || d2 > r_out2 {
+                    continue;
+                }
+                let bgr: &Vec3b = color_image.at_2d(row, col)?;
+                rs.push(bgr[2]);
+                gs.push(bgr[1]);
+                bs.push(bgr[0]);
+            }
+        }
+
+        if rs.len() < 30 {
+            return Ok(None);
+        }
+        rs.sort_unstable();
+        gs.sort_unstable();
+        bs.sort_unstable();
+        let mid = rs.len() / 2;
+        Ok(Some((rs[mid], gs[mid], bs[mid])))
     }
 
     fn match_circles_to_elements<'a>(
@@ -292,15 +366,6 @@ impl GameStateDetector {
     ) -> Result<Vec<ScoredMatch<'a>>> {
         let use_hsv = self.config.color_matching.use_hsv;
         let tol = self.config.color_matching.tolerance;
-
-        let is_gray = |rgb: &(u8, u8, u8)| -> bool {
-            let mx = rgb.0.max(rgb.1).max(rgb.2) as f64;
-            if mx < 1.0 {
-                return true;
-            }
-            let mn = rgb.0.min(rgb.1).min(rgb.2) as f64;
-            (mx - mn) / mx < 0.12 // saturation < 12%
-        };
 
         // Provisional per-circle result. We keep the full ranked candidate
         // list (as element indices) so a circle can be re-matched against a
@@ -314,7 +379,7 @@ impl GameStateDetector {
         let mut provs: Vec<Prov> = Vec::new();
 
         // ----- Phase 1: rank every element per circle, pick provisional best
-        // (with the gray tie-break) -------------------------------------------
+        // (the nearest color match) -------------------------------------------
         for (ci, circle) in circles.iter().enumerate() {
             let raw_color = circle.mean_color;
             let color = Self::normalize_brightness(raw_color);
@@ -352,29 +417,20 @@ impl GameStateDetector {
                 );
             }
 
-            // Provisional best + gray tie-break (prefer lowest atomic number
-            // among near-tied GRAYS — see note below).
-            let (mut best_ei, mut best_d) = ranked[0];
-            let base = ranked[0].1;
-            if is_gray(&elements_data.elements[best_ei].rgb) {
-                let tie_eps = 0.12;
-                let mut chosen_z = elements_data.elements[best_ei].element_type.to_numeric();
-                for &(ei, d) in ranked.iter() {
-                    if d > base + tie_eps {
-                        break;
-                    }
-                    let e = &elements_data.elements[ei];
-                    if !is_gray(&e.rgb) {
-                        continue;
-                    }
-                    let z = e.element_type.to_numeric();
-                    if z > 0 && (chosen_z <= 0 || z < chosen_z) {
-                        best_ei = ei;
-                        best_d = d;
-                        chosen_z = z;
-                    }
-                }
-            }
+            // Provisional best = the nearest color match, full stop.
+            //
+            // A low-Z "tie-break" used to live here: among candidates within a
+            // window of the best distance it preferred the lowest atomic
+            // number, on the theory that ring populations are overwhelmingly
+            // low-Z. That prior is wrong whenever the true atom is the heavier
+            // member of a color-similar pair, and it actively overrode CORRECT
+            // #1 matches — e.g. Titanium (Z=22) ranked first by color but was
+            // relabelled Aluminum (Z=13), and Argon (18) relabelled Chlorine
+            // (17). The far-off high-Z color collisions the tie-break was also
+            // meant to catch (Iridium, Copernicium, etc.) are already handled
+            // by the reachability ceiling in Phase 2/3 below, so trusting the
+            // nearest match here both fixes the mislabels and loses nothing.
+            let (best_ei, best_d) = ranked[0];
 
             provs.push(Prov {
                 circle_idx: ci,
